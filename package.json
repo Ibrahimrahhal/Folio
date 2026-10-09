@@ -1,0 +1,96 @@
+{
+  "name": "folio",
+  "productName": "Folio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A local reading library for PDF, EPUB, and Markdown books.",
+  "author": "Ibrahim Rahhal",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ibrahimrahhal/Folio.git"
+  },
+  "main": "electron/main.cjs",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n vite,electron \"vite\" \"wait-on http://localhost:5173 && cross-env FOLIO_DEV=1 electron .\"",
+    "build": "vite build",
+    "start": "vite build && electron .",
+    "icon": "electron scripts/make-icon.cjs",
+    "test": "node scripts/self-check.cjs && node scripts/check-outline.mjs",
+    "dist": "vite build && electron-builder --win portable --config.portable.artifactName=Folio.exe",
+    "release": "vite build && electron-builder"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.2.0",
+    "jszip": "^3.10.1"
+  },
+  "devDependencies": {
+    "@fontsource/cormorant-garamond": "^5.2.5",
+    "@fontsource/eb-garamond": "^5.2.5",
+    "@fontsource/inter": "^5.2.5",
+    "@fontsource/jetbrains-mono": "^5.2.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "dompurify": "^3.2.4",
+    "electron": "^33.4.0",
+    "electron-builder": "^25.1.8",
+    "epubjs": "^0.3.93",
+    "highlight.js": "^11.11.1",
+    "marked": "^15.0.7",
+    "pdfjs-dist": "^4.10.38",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^6.2.0",
+    "vite-plugin-static-copy": "^2.3.0",
+    "wait-on": "^8.0.2"
+  },
+  "build": {
+    "appId": "app.folio.reader",
+    "productName": "Folio",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "portable",
+        "nsis"
+      ],
+      "icon": "build/icon.png"
+    },
+    "portable": {
+      "artifactName": "Folio-${version}-Windows.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "artifactName": "Folio-Setup-${version}.${ext}",
+      "shortcutName": "Folio"
+    },
+    "mac": {
+      "category": "public.app-category.entertainment",
+      "icon": "build/icon.png",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "artifactName": "Folio-${version}-macOS.${ext}"
+    },
+    "linux": {
+      "category": "Office",
+      "icon": "build/icon.png",
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "artifactName": "Folio-${version}-Linux.${ext}"
+    }
+  }
+}
