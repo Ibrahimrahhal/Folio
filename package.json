@@ -4,7 +4,10 @@
   "version": "1.0.0",
   "private": true,
   "description": "A local reading library for PDF, EPUB, and Markdown books.",
-  "author": "Ibrahim Rahhal",
+  "author": {
+    "name": "Ibrahim Rahhal",
+    "email": "ibrahim.rahhal3636@gmail.com"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
