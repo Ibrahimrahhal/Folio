@@ -5,11 +5,13 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 const JSZip = require('jszip');
 const { createLibrary } = require('../electron/library.cjs');
+const { customFrame, frameOptions, registerWindowIpc, watchWindow } = require('../electron/window.cjs');
 
 const outDir = path.join(__dirname, '..', '.verify');
 const libraryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'folio-ui-'));
 const failures = [];
 const logs = [];
+let pickCalls = 0;
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -48,6 +50,95 @@ async function waitForText(win, text, timeout = 12000) {
   throw new Error(`Timed out waiting for "${text}". Saw: ${textBody.slice(0, 400)}`);
 }
 
+async function clickPoint(win, x, y) {
+  win.webContents.sendInputEvent({ type: 'mouseMove', x, y });
+  win.webContents.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+  win.webContents.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+}
+
+// Scrolls the element into view and returns its centre in window coordinates. A selector
+// with " >> " reaches into the EPUB frame.
+async function centerOf(win, selector) {
+  return win.webContents.executeJavaScript(`
+    (() => {
+      const [outer, inner] = ${JSON.stringify(selector)}.split(' >> ');
+      let el = document.querySelector(outer);
+      let dx = 0;
+      let dy = 0;
+      if (el && inner) {
+        const frameRect = el.getBoundingClientRect();
+        dx = frameRect.left;
+        dy = frameRect.top;
+        el = el.contentDocument?.querySelector(inner);
+      } else if (el) {
+        el.scrollIntoView({ block: 'center' });
+      }
+      if (!el) return null;
+      const rect = el.getBoundingClientRect();
+      return { x: Math.round(dx + rect.left + rect.width / 2), y: Math.round(dy + rect.top + rect.height / 2) };
+    })()
+  `);
+}
+
+async function clickOn(win, selector, timeout = 6000) {
+  const start = Date.now();
+  let point = null;
+  while (!point && Date.now() - start < timeout) {
+    point = await centerOf(win, selector);
+    if (!point) await delay(150);
+  }
+  if (!point) throw new Error(`Nothing to click for ${selector}`);
+  await delay(120);
+  await clickPoint(win, point.x, point.y);
+}
+
+async function pressKey(win, keyCode, modifiers = []) {
+  win.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers });
+  if (keyCode.length === 1 && modifiers.every((m) => m === 'shift')) win.webContents.sendInputEvent({ type: 'char', keyCode, modifiers });
+  win.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers });
+  await delay(200);
+}
+
+async function viewerState(win) {
+  return win.webContents.executeJavaScript(`
+    (() => {
+      const viewer = document.querySelector('.image-viewer');
+      const img = viewer?.querySelector('.viewer-img');
+      let center = null;
+      if (img && img.naturalWidth) {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const context = canvas.getContext('2d');
+        context.drawImage(img, 0, 0);
+        center = [...context.getImageData(Math.floor(canvas.width / 2), Math.floor(canvas.height / 2), 1, 1).data].slice(0, 3);
+      }
+      return {
+        open: !!viewer,
+        width: img?.naturalWidth || 0,
+        height: img?.naturalHeight || 0,
+        scheme: (img?.src || '').split(':')[0],
+        center,
+        shown: Math.round(img?.getBoundingClientRect().width || 0),
+        caption: viewer?.querySelector('.viewer-caption')?.textContent || '',
+        zoom: viewer?.querySelector('.zoom-label')?.textContent || '',
+        focus: document.activeElement?.getAttribute('aria-label') || '',
+        inReader: !!document.querySelector('.reader-title'),
+      };
+    })()
+  `);
+}
+
+async function waitForViewer(win, timeout = 10000) {
+  const start = Date.now();
+  let state = await viewerState(win);
+  while (!(state.open && state.width > 0 && /%/.test(state.zoom)) && Date.now() - start < timeout) {
+    await delay(150);
+    state = await viewerState(win);
+  }
+  return state;
+}
+
 async function clickText(win, text) {
   const clicked = await win.webContents.executeJavaScript(`
     (() => {
@@ -68,10 +159,13 @@ function simplePdf(pageTexts) {
     return objects.length;
   };
   const fontId = add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+  const plate = `${'C64545'.repeat(16)}>`;
+  const imageId = add(`<< /Type /XObject /Subtype /Image /Width 4 /Height 4 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /ASCIIHexDecode /Length ${plate.length} >>\nstream\n${plate}\nendstream`);
   const contentIds = [];
   const pageIds = [];
-  for (const text of pageTexts) {
-    const stream = `BT /F1 22 Tf 64 720 Td (${text.replace(/[()\\]/g, '\\$&')}) Tj ET`;
+  for (const [index, text] of pageTexts.entries()) {
+    const picture = index === 0 ? ' q 240 0 0 160 64 440 cm /Im1 Do Q' : '';
+    const stream = `BT /F1 22 Tf 64 720 Td (${text.replace(/[()\\]/g, '\\$&')}) Tj ET${picture}`;
     contentIds.push(add(`<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`));
     pageIds.push(add(''));
   }
@@ -79,7 +173,7 @@ function simplePdf(pageTexts) {
   const catalogId = add(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`);
   objects[pagesId - 1] = `<< /Type /Pages /Count ${pageIds.length} /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] >>`;
   pageIds.forEach((pageId, index) => {
-    objects[pageId - 1] = `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 612 792] /Contents ${contentIds[index]} 0 R /Resources << /Font << /F1 ${fontId} 0 R >> >> >>`;
+    objects[pageId - 1] = `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 612 792] /Contents ${contentIds[index]} 0 R /Resources << /Font << /F1 ${fontId} 0 R >> /XObject << /Im1 ${imageId} 0 R >> >> >>`;
   });
   let body = '%PDF-1.4\n';
   const offsets = [0];
@@ -130,7 +224,7 @@ async function sampleEpub(file) {
     <navPoint id="n2" playOrder="2"><navLabel><text>Two</text></navLabel><content src="c2.xhtml"/></navPoint>
   </navMap>
 </ncx>`);
-  zip.file('OEBPS/c1.xhtml', '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head><body><h1>Chapter One</h1><p>The harbor was the color of tea.</p></body></html>');
+  zip.file('OEBPS/c1.xhtml', '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head><body><h1>Chapter One</h1><p>The harbor was the color of tea.</p><p><img src="cover.png" alt="Harbor map" style="width:120px;height:120px"/></p></body></html>');
   zip.file('OEBPS/c2.xhtml', '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Two</title></head><body><h1>Chapter Two</h1><p>The second lamp marked the turn.</p></body></html>');
   zip.file('OEBPS/cover.png', png);
   fs.writeFileSync(file, await zip.generateAsync({ type: 'nodebuffer' }));
@@ -152,7 +246,10 @@ function register(library) {
   });
   ipcMain.handle('books:list', () => library.listBooks());
   ipcMain.handle('books:get', (_e, id) => library.getBook(id));
-  ipcMain.handle('books:pick', () => []);
+  ipcMain.handle('books:pick', () => {
+    pickCalls += 1;
+    return [];
+  });
   ipcMain.handle('books:import-path', (_e, filePath) => library.importFromPath(filePath));
   ipcMain.handle('books:read', (_e, id) => library.readBook(id));
   ipcMain.handle('books:progress', (_e, id, progress) => library.saveProgress(id, progress));
@@ -162,6 +259,7 @@ function register(library) {
   ipcMain.handle('books:sidecar-read', (_e, id, name) => library.readSidecar(id, name));
   ipcMain.handle('books:sidecar-write', (_e, id, name, text) => library.writeSidecar(id, name, text));
   ipcMain.handle('app:open-external', () => {});
+  registerWindowIpc(ipcMain);
 }
 
 async function main() {
@@ -172,6 +270,7 @@ async function main() {
     height: 860,
     show: true,
     backgroundColor: '#faf9f5',
+    ...frameOptions(),
     webPreferences: {
       preload: path.join(__dirname, '../electron/preload.cjs'),
       contextIsolation: true,
@@ -180,6 +279,7 @@ async function main() {
       backgroundThrottling: false,
     },
   });
+  watchWindow(win);
   win.webContents.on('console-message', (event, level, message) => {
     const text = event && event.message ? event.message : message;
     const severity = event && event.level != null ? event.level : level;
@@ -194,12 +294,50 @@ async function main() {
   await waitForText(win, 'Your shelf is waiting');
   await shot(win, '01-empty.png');
 
+  const labelOf = (selector) => win.webContents.executeJavaScript(`document.querySelector(${JSON.stringify(selector)})?.getAttribute('aria-label') || ''`);
+  if (customFrame) {
+    const controls = await win.webContents.executeJavaScript(`[...document.querySelectorAll('.window-controls .wc')].map((b) => b.getAttribute('aria-label')).join(',')`);
+    check('window controls in the title bar', controls === 'Minimize,Maximize,Close', controls);
+    await clickOn(win, '.wc-max');
+    await delay(700);
+    check('maximize button maximizes', win.isMaximized() && (await labelOf('.wc-max')) === 'Restore', `${win.isMaximized()} ${await labelOf('.wc-max')}`);
+    await shot(win, '01b-maximized.png');
+    await clickOn(win, '.wc-max');
+    await delay(700);
+    check('restore button restores', !win.isMaximized() && (await labelOf('.wc-max')) === 'Maximize', `${win.isMaximized()} ${await labelOf('.wc-max')}`);
+    for (const name of ['min', 'max', 'close']) {
+      const point = await centerOf(win, `.wc-${name}`);
+      win.webContents.sendInputEvent({ type: 'mouseMove', x: point.x, y: point.y });
+      await delay(350);
+      const image = await win.webContents.capturePage({ x: 940, y: 0, width: 340, height: 64 });
+      fs.writeFileSync(path.join(outDir, `01d-hover-${name}.png`), image.toPNG());
+    }
+    win.webContents.sendInputEvent({ type: 'mouseMove', x: 600, y: 400 });
+    const dragRegion = await win.webContents.executeJavaScript(`getComputedStyle(document.querySelector('.top-nav')).webkitAppRegion || getComputedStyle(document.querySelector('.top-nav')).getPropertyValue('-webkit-app-region')`);
+    check('title bar drags the window', dragRegion === 'drag', dragRegion);
+  }
+
+  await clickOn(win, '.title-btn[aria-label="Keyboard shortcuts"]');
+  await delay(300);
+  const librarySheet = await bodyText(win);
+  check('shortcuts sheet opens from the title bar', librarySheet.includes('Shortcuts') && librarySheet.includes('Add a book') && librarySheet.includes('Search the shelf'), librarySheet.slice(0, 120));
+  await shot(win, '01c-shortcuts-library.png');
+  await pressKey(win, 'Escape');
+  check('escape closes the sheet', !(await win.webContents.executeJavaScript(`!!document.querySelector('.shortcuts-sheet')`)));
+  if (customFrame) {
+    await pressKey(win, 'O', ['control']);
+    await delay(200);
+    check('ctrl+o asks for a book', pickCalls === 1, `pick dialog opened ${pickCalls} times`);
+  }
+
   const incoming = path.join(libraryRoot, 'incoming');
   fs.mkdirSync(incoming);
   const markdown = path.join(incoming, 'field_notes.md');
   fs.writeFileSync(markdown, `# Field notes
 
 A margin is a place to return to.
+
+![Harbor lamp](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mP8z8BQz0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC)
 
 ## Kept on this machine
 
@@ -234,6 +372,10 @@ function remember(page) {
   await waitForText(win, 'The Warm Harbor');
   await delay(1500);
   await shot(win, '02-shelf.png');
+  await pressKey(win, 'F', ['control']);
+  const searchFocused = await win.webContents.executeJavaScript(`document.activeElement?.classList.contains('search') || false`);
+  check('ctrl+f focuses the search', searchFocused);
+  await win.webContents.executeJavaScript(`document.activeElement?.blur()`);
   const shelf = await bodyText(win);
   check('shelf shows percent', shelf.includes('0%'), 'expected a zero percent on a new book');
   check('continue hidden at zero', !shelf.includes('Continue'));
@@ -249,6 +391,30 @@ function remember(page) {
   await clickText(win, 'Field notes');
   await waitForText(win, 'Kept on this machine');
   await shot(win, '03-markdown.png');
+
+  const mdScroll = () => win.webContents.executeJavaScript(`Math.round(document.querySelector('.md-scroll').scrollTop)`);
+  await pressKey(win, 'Space');
+  const afterSpace = await mdScroll();
+  await pressKey(win, 'Down');
+  const afterDown = await mdScroll();
+  await pressKey(win, 'Space', ['shift']);
+  const afterShiftSpace = await mdScroll();
+  check('space pages down, arrow scrolls, shift+space pages up', afterSpace > 200 && afterDown > afterSpace && afterShiftSpace < afterDown, `${afterSpace} -> ${afterDown} -> ${afterShiftSpace}`);
+  await pressKey(win, 'Home');
+  check('home goes to the start', (await mdScroll()) === 0);
+  await pressKey(win, 'O');
+  const outlineShown = await win.webContents.executeJavaScript(`!!document.querySelector('.outline')`);
+  await pressKey(win, 'Escape');
+  const outlineAfterEsc = await win.webContents.executeJavaScript(`({ outline: !!document.querySelector('.outline'), reader: !!document.querySelector('.reader-title') })`);
+  check('o opens the outline, escape closes only the outline', outlineShown && !outlineAfterEsc.outline && outlineAfterEsc.reader, JSON.stringify({ outlineShown, ...outlineAfterEsc }));
+  await pressKey(win, '?', ['shift']);
+  await delay(200);
+  const readerSheet = await win.webContents.executeJavaScript(`document.querySelector('.shortcuts-sheet')?.textContent || ''`);
+  check('? opens reading shortcuts', readerSheet.includes('Turning pages') && readerSheet.includes('Previous page'), readerSheet.slice(0, 100));
+  await shot(win, '03c-shortcuts-reader.png');
+  await pressKey(win, 'Escape');
+  const sheetGone = await win.webContents.executeJavaScript(`({ sheet: !!document.querySelector('.shortcuts-sheet'), reader: !!document.querySelector('.reader-title') })`);
+  check('escape closes the sheet, not the book', !sheetGone.sheet && sheetGone.reader, JSON.stringify(sheetGone));
   const markdownState = await win.webContents.executeJavaScript(`
     (() => {
       const code = document.querySelector('.md-code');
@@ -257,6 +423,19 @@ function remember(page) {
     })()
   `);
   check('markdown renders code and table', markdownState.code && markdownState.table && markdownState.title === 'Field notes', JSON.stringify(markdownState));
+
+  await clickOn(win, '.markdown img.md-zoomable');
+  const mdViewer = await waitForViewer(win);
+  check('markdown image opens viewer', mdViewer.open && mdViewer.width === 10 && mdViewer.caption === 'Harbor lamp', JSON.stringify(mdViewer));
+  check('viewer takes focus', mdViewer.focus === 'Close image', mdViewer.focus);
+  await clickOn(win, '.viewer-bar [aria-label="Zoom in"]');
+  await delay(250);
+  const zoomed = await viewerState(win);
+  check('viewer zooms', zoomed.zoom !== mdViewer.zoom, `${mdViewer.zoom} -> ${zoomed.zoom}`);
+  await shot(win, '03b-markdown-image.png');
+  await pressKey(win, 'Escape');
+  const mdClosed = await viewerState(win);
+  check('escape closes viewer, not the book', !mdClosed.open && mdClosed.inReader, JSON.stringify(mdClosed));
 
   await clickText(win, 'Next');
   await clickText(win, 'Next');
@@ -295,6 +474,52 @@ function remember(page) {
     })()
   `);
   check('pdf page painted', ink > 20, `dark samples ${ink}`);
+
+  const hits = await win.webContents.executeJavaScript(`document.querySelectorAll('.pdf-image-hit').length`);
+  check('pdf image found on page', hits === 1, `targets ${hits}`);
+  await clickOn(win, '.pdf-image-hit');
+  const pdfViewer = await waitForViewer(win);
+  const [red, green, blue] = pdfViewer.center || [];
+  check('pdf image opens viewer', pdfViewer.open && pdfViewer.scheme === 'blob' && pdfViewer.width >= 480 && pdfViewer.caption === 'Page 1', JSON.stringify(pdfViewer));
+  check('pdf viewer shows the picture', red > 170 && green < 110 && blue < 110, JSON.stringify(pdfViewer.center));
+  await shot(win, '06b-pdf-image.png');
+  for (let i = 0; i < 4; i += 1) {
+    win.webContents.sendInputEvent({ type: 'mouseWheel', x: 640, y: 400, deltaX: 0, deltaY: 240 });
+    await delay(60);
+  }
+  await delay(200);
+  const wheeled = await viewerState(win);
+  check('wheel zooms the image', parseInt(wheeled.zoom, 10) > 200, `${pdfViewer.zoom} -> ${wheeled.zoom}`);
+  const transformOf = () => win.webContents.executeJavaScript(`document.querySelector('.viewer-img')?.style.transform || ''`);
+  const beforeDrag = await transformOf();
+  win.webContents.sendInputEvent({ type: 'mouseDown', x: 640, y: 400, button: 'left', clickCount: 1 });
+  for (let step = 1; step <= 6; step += 1) {
+    win.webContents.sendInputEvent({ type: 'mouseMove', x: 640 + step * 25, y: 400 + step * 10, button: 'left' });
+    await delay(30);
+  }
+  win.webContents.sendInputEvent({ type: 'mouseUp', x: 790, y: 460, button: 'left', clickCount: 1 });
+  await delay(200);
+  const afterDrag = await transformOf();
+  const dragged = await viewerState(win);
+  check('drag pans without closing or zooming', afterDrag !== beforeDrag && dragged.open && dragged.zoom === wheeled.zoom, `${beforeDrag} -> ${afterDrag}`);
+  await clickOn(win, '.viewer-close');
+  await delay(250);
+  const pdfClosed = await viewerState(win);
+  check('close button closes viewer', !pdfClosed.open && (await bodyText(win)).includes('1 / 3'), JSON.stringify(pdfClosed));
+
+  const pdfScroll = () => win.webContents.executeJavaScript(`Math.round(document.querySelector('.pdf-stage').scrollTop)`);
+  await pressKey(win, 'Down');
+  const firstStep = await pdfScroll();
+  let presses = 1;
+  while (!(await bodyText(win)).includes('2 / 3') && presses < 60) {
+    await pressKey(win, 'Down');
+    presses += 1;
+  }
+  check('down arrow scrolls the sheet, then turns the page', firstStep > 0 && (await bodyText(win)).includes('2 / 3'), `first step ${firstStep}px, ${presses} presses`);
+  await pressKey(win, 'Up');
+  await delay(500);
+  const backUp = await pdfScroll();
+  check('up arrow at the top returns to the end of the last page', (await bodyText(win)).includes('1 / 3') && backUp > 100, `scrollTop ${backUp}`);
   await shot(win, '06-pdf.png');
   await clickText(win, 'Next');
   await waitForText(win, '2 / 3');
@@ -317,6 +542,34 @@ function remember(page) {
     })()
   `);
   check('epub opened', epubState.frame && epubState.height > 100 && !epubState.error, JSON.stringify(epubState));
+
+  await clickOn(win, '.epub-view iframe >> img');
+  const epubViewer = await waitForViewer(win);
+  check('epub image opens viewer', epubViewer.open && epubViewer.width === 10 && epubViewer.caption === 'Harbor map', JSON.stringify(epubViewer));
+  check('viewer is no smaller than the page', epubViewer.shown >= 119, `shown ${epubViewer.shown}px, page 120px`);
+  await shot(win, '07b-epub-image.png');
+  await pressKey(win, 'Escape');
+  const epubClosed = await viewerState(win);
+  check('epub viewer closes', !epubClosed.open && epubClosed.inReader, JSON.stringify(epubClosed));
+
+  // Keys pressed while the book's own frame has focus still have to turn pages.
+  const frameText = () => win.webContents.executeJavaScript(`document.querySelector('.epub-view iframe')?.contentDocument?.body?.innerText || ''`);
+  await clickOn(win, '.epub-view iframe >> p');
+  await pressKey(win, 'Right');
+  await delay(600);
+  check('right arrow turns the page from inside the book', (await frameText()).includes('Chapter Two'), (await frameText()).slice(0, 80));
+  await pressKey(win, 'Left');
+  await delay(600);
+  check('left arrow turns back', (await frameText()).includes('Chapter One'), (await frameText()).slice(0, 80));
+
+  await pressKey(win, 'F11');
+  await delay(1200);
+  const wentFull = win.isFullScreen();
+  await shot(win, '07c-full-screen.png');
+  await pressKey(win, 'Escape');
+  await delay(1200);
+  const stillReading = await win.webContents.executeJavaScript(`!!document.querySelector('.reader-title')`);
+  check('f11 goes full screen, escape leaves it but keeps the book open', wentFull && !win.isFullScreen() && stillReading, `${wentFull} ${win.isFullScreen()} ${stillReading}`);
   await shot(win, '07-epub.png');
   await clickText(win, 'Next');
   await delay(600);

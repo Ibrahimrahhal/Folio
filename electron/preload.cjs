@@ -14,6 +14,20 @@ contextBridge.exposeInMainWorld('folio', {
   readSidecar: (id, name) => ipcRenderer.invoke('books:sidecar-read', id, name),
   writeSidecar: (id, name, text) => ipcRenderer.invoke('books:sidecar-write', id, name, text),
   openExternal: (url) => ipcRenderer.invoke('app:open-external', url),
+  platform: process.platform,
+  frame: {
+    custom: process.platform !== 'darwin',
+    state: () => ipcRenderer.invoke('window:state'),
+    minimize: () => ipcRenderer.invoke('window:minimize'),
+    toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
+    toggleFullScreen: () => ipcRenderer.invoke('window:toggle-full-screen'),
+    close: () => ipcRenderer.invoke('window:close'),
+    onState: (callback) => {
+      const listener = (_event, state) => callback(state);
+      ipcRenderer.on('window:state', listener);
+      return () => ipcRenderer.removeListener('window:state', listener);
+    },
+  },
   onMenuAdd: (callback) => {
     const listener = () => callback();
     ipcRenderer.on('menu:add', listener);

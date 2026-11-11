@@ -2,13 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import ePub from 'epubjs';
 import { toArrayBuffer } from '../bookUtils.js';
 
-export default function EpubReader({ bookId, startCfi, zoom = 1, controls, onLocation, onReady, onOutline }) {
+export default function EpubReader({ bookId, startCfi, zoom = 1, controls, onLocation, onReady, onOutline, onImage }) {
   const holderRef = useRef(null);
   const renditionRef = useRef(null);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
-  const callbacks = useRef({ onLocation, onReady, onOutline });
-  callbacks.current = { onLocation, onReady, onOutline };
+  const callbacks = useRef({ onLocation, onReady, onOutline, onImage });
+  callbacks.current = { onLocation, onReady, onOutline, onImage };
   const [error, setError] = useState('');
   const [ready, setReady] = useState(false);
 
@@ -62,10 +62,25 @@ export default function EpubReader({ bookId, startCfi, zoom = 1, controls, onLoc
           },
           a: { color: '#cc785c' },
           img: { 'max-width': '100%' },
+          'img, svg image': { cursor: 'zoom-in' },
+          'a[href] img, a[href] svg image': { cursor: 'pointer' },
         });
         rendition.themes.select('folio');
         rendition.themes.fontSize(`${Math.round(zoomRef.current * 100)}%`);
         renditionRef.current = rendition;
+        rendition.hooks.content.register((contents) => {
+          const doc = contents.document;
+          if (!doc) return;
+          doc.addEventListener('click', (event) => {
+            const image = imageFromClick(event);
+            if (!image) return;
+            event.preventDefault();
+            callbacks.current.onImage?.(image);
+          });
+          // Once a click lands in the book, keys go to this frame instead of the reader.
+          // Hand them on so the arrows, Space and the rest keep working.
+          doc.addEventListener('keydown', forwardKey);
+        });
 
         const report = (location) => {
           if (!accept || !location?.start) return;
@@ -148,6 +163,48 @@ export default function EpubReader({ bookId, startCfi, zoom = 1, controls, onLoc
       <div ref={holderRef} className="epub-view" />
     </div>
   );
+}
+
+const XLINK = 'http://www.w3.org/1999/xlink';
+
+function forwardKey(event) {
+  if (event.target?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+  const copy = new KeyboardEvent('keydown', {
+    key: event.key,
+    code: event.code,
+    shiftKey: event.shiftKey,
+    ctrlKey: event.ctrlKey,
+    altKey: event.altKey,
+    metaKey: event.metaKey,
+    repeat: event.repeat,
+    bubbles: true,
+    cancelable: true,
+  });
+  if (!window.dispatchEvent(copy)) event.preventDefault();
+}
+
+// epub.js swaps archive paths for blob URLs made by this window, so they load outside the frame too.
+function imageFromClick(event) {
+  const target = event.target;
+  if (!target?.closest || event.button !== 0) return null;
+  const node = target.closest('img, image');
+  if (!node || node.closest('a[href]')) return null;
+  const rect = node.getBoundingClientRect();
+  const hint = { w: rect.width, h: rect.height };
+  if (node.localName === 'img') {
+    if (!node.complete || !node.naturalWidth) return null;
+    return { src: node.currentSrc || node.src, alt: node.alt || node.title || '', hint };
+  }
+  const href = node.getAttribute('href') || node.getAttributeNS(XLINK, 'href');
+  if (!href) return null;
+  let src;
+  try {
+    src = new URL(href, node.ownerDocument.baseURI).href;
+  } catch {
+    return null;
+  }
+  const label = node.closest('svg')?.querySelector('title')?.textContent || node.getAttribute('aria-label') || '';
+  return { src, alt: label.trim(), hint };
 }
 
 function percentageFrom(location, book) {

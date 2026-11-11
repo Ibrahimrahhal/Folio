@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { clampZoom, percentLabel, snapshotProgress, ZOOM_STEP } from '../bookUtils.js';
 import EpubReader from './EpubReader.jsx';
+import ImageViewer from './ImageViewer.jsx';
 import MarkdownReader from './MarkdownReader.jsx';
 import Outline, { activeOutlineId } from './Outline.jsx';
 import PdfReader from './PdfReader.jsx';
+import WindowControls, { ShortcutsButton } from './WindowControls.jsx';
+import { windowState } from '../windowState.js';
 
 const SAVE_EVERY_MS = 5000;
+const SCROLL_STEP = 80;
 
 export default function Reader({ book, onBack }) {
   const locationRef = useRef(null);
@@ -27,7 +31,12 @@ export default function Reader({ book, onBack }) {
   const [zoom, setZoom] = useState(initialZoom);
   const [outline, setOutline] = useState([]);
   const [outlineOpen, setOutlineOpen] = useState(false);
+  const outlineOpenRef = useRef(outlineOpen);
+  outlineOpenRef.current = outlineOpen;
   const [place, setPlace] = useState(null);
+  const [image, setImage] = useState(null);
+  const imageOpen = useRef(false);
+  imageOpen.current = !!image;
 
   useEffect(() => {
     document.title = `${book.title} · Folio`;
@@ -45,11 +54,16 @@ export default function Reader({ book, onBack }) {
 
   useEffect(() => {
     function onKey(event) {
+      // The image viewer owns the keyboard while it is open, Escape included.
+      if (imageOpen.current) return;
       const target = event.target;
       const typing = target instanceof HTMLElement && target.closest('input, textarea');
       if (event.key === 'Escape') {
+        // Step out one layer at a time: full screen, then the outline, then the book.
         event.preventDefault();
-        backRef.current();
+        if (windowState().fullScreen) window.folio.frame?.toggleFullScreen();
+        else if (outlineOpenRef.current) setOutlineOpen(false);
+        else backRef.current();
         return;
       }
       if ((event.ctrlKey || event.metaKey) && !event.altKey) {
@@ -69,19 +83,50 @@ export default function Reader({ book, onBack }) {
           return;
         }
       }
-      if (typing) return;
-      if (event.key === 'ArrowRight' || event.key === 'PageDown' || (event.key === ' ' && !(target instanceof HTMLElement && target.closest('button, a')))) {
+      if (typing || event.ctrlKey || event.metaKey || event.altKey) return;
+      const onControl = target instanceof HTMLElement && target.closest('button, a, [role="button"]');
+      const inOutline = target instanceof HTMLElement && target.closest('.outline');
+      const go = (action) => {
         event.preventDefault();
-        controls.current.next();
-      } else if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
-        event.preventDefault();
-        controls.current.prev();
-      } else if (event.key === 'Home') {
-        event.preventDefault();
-        controls.current.first();
-      } else if (event.key === 'End') {
-        event.preventDefault();
-        controls.current.last();
+        action();
+      };
+      switch (event.key) {
+        case 'ArrowRight':
+        case 'PageDown':
+          go(() => controls.current.next());
+          break;
+        case 'ArrowLeft':
+        case 'PageUp':
+          go(() => controls.current.prev());
+          break;
+        case ' ':
+          if (onControl) return;
+          go(() => (event.shiftKey ? controls.current.prev() : controls.current.next()));
+          break;
+        case 'ArrowDown':
+        case 'ArrowUp': {
+          if (inOutline) return;
+          const step = event.key === 'ArrowDown' ? SCROLL_STEP : -SCROLL_STEP;
+          go(() => {
+            if (controls.current.scroll) controls.current.scroll(step);
+            else if (step > 0) controls.current.next();
+            else controls.current.prev();
+          });
+          break;
+        }
+        case 'Home':
+          go(() => controls.current.first());
+          break;
+        case 'End':
+          go(() => controls.current.last());
+          break;
+        case 'o':
+        case 'O':
+          if (event.shiftKey) return;
+          go(() => setOutlineOpen((open) => !open));
+          break;
+        default:
+          break;
       }
     }
     window.addEventListener('keydown', onKey);
@@ -136,7 +181,7 @@ export default function Reader({ book, onBack }) {
 
   useEffect(() => {
     function onWheel(event) {
-      if (!event.ctrlKey) return;
+      if (!event.ctrlKey || imageOpen.current) return;
       event.preventDefault();
       changeZoom(zoomRef.current + (event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP));
     }
@@ -164,7 +209,11 @@ export default function Reader({ book, onBack }) {
           </button>
         </div>
         <h1 className="reader-title">{book.title}</h1>
-        <p className="reader-pct">{percent}%</p>
+        <div className="nav-end">
+          <p className="reader-pct">{percent}%</p>
+          <ShortcutsButton />
+          <WindowControls />
+        </div>
       </header>
       <div className="read-progress" aria-hidden="true">
         <span style={{ width: `${percent}%` }} />
@@ -189,6 +238,7 @@ export default function Reader({ book, onBack }) {
             onLocation={onLocation}
             onReady={onReady}
             onOutline={setOutline}
+            onImage={setImage}
           />
         )}
         {book.format === 'epub' && (
@@ -200,6 +250,7 @@ export default function Reader({ book, onBack }) {
             onLocation={onLocation}
             onReady={onReady}
             onOutline={setOutline}
+            onImage={setImage}
           />
         )}
         {book.format === 'md' && (
@@ -211,6 +262,7 @@ export default function Reader({ book, onBack }) {
             onLocation={onLocation}
             onReady={onReady}
             onOutline={setOutline}
+            onImage={setImage}
           />
         )}
         </div>
@@ -257,6 +309,7 @@ export default function Reader({ book, onBack }) {
           )}
         </span>
       </footer>
+      {image && <ImageViewer image={image} onClose={() => setImage(null)} />}
     </div>
   );
 }

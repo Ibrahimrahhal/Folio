@@ -2,6 +2,7 @@ const { app, BrowserWindow, dialog, ipcMain, Menu, protocol, net, shell } = requ
 const path = require('path');
 const { pathToFileURL } = require('url');
 const { createLibrary } = require('./library.cjs');
+const { customFrame, frameOptions, registerWindowIpc, watchWindow } = require('./window.cjs');
 
 const isDev = process.env.FOLIO_DEV === '1';
 
@@ -38,7 +39,7 @@ function createWindow() {
     minHeight: 640,
     backgroundColor: '#faf9f5',
     title: 'Folio',
-    autoHideMenuBar: false,
+    ...frameOptions(),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -58,6 +59,23 @@ function createWindow() {
     if (!devUrl) event.preventDefault();
   });
 
+  watchWindow(mainWindow);
+
+  // Without a native frame there is no menu bar to carry the developer shortcuts.
+  if (isDev && customFrame) {
+    mainWindow.webContents.on('before-input-event', (event, input) => {
+      if (input.type !== 'keyDown') return;
+      const key = input.key.toLowerCase();
+      if (input.control && input.shift && key === 'i') {
+        mainWindow.webContents.toggleDevTools();
+        event.preventDefault();
+      } else if ((input.control && key === 'r') || input.key === 'F5') {
+        mainWindow.webContents.reload();
+        event.preventDefault();
+      }
+    });
+  }
+
   mainWindow.webContents.on('zoom-changed', () => {
     mainWindow.webContents.setZoomFactor(1);
   });
@@ -72,6 +90,12 @@ function createWindow() {
 }
 
 function buildMenu(win) {
+  // Windows and Linux draw their own title bar, so there is no menu bar to show. The renderer
+  // handles Ctrl+O there, and Chromium handles the editing keys on its own.
+  if (customFrame) {
+    Menu.setApplicationMenu(null);
+    return;
+  }
   const template = [
     {
       label: 'File',
@@ -171,6 +195,7 @@ function registerIpc() {
   ipcMain.handle('books:sidecar-read', (_event, id, name) => library.readSidecar(id, name));
   ipcMain.handle('books:sidecar-write', (_event, id, name, text) => library.writeSidecar(id, name, text));
   ipcMain.handle('app:open-external', (_event, url) => openExternal(url));
+  registerWindowIpc(ipcMain);
 }
 
 if (gotLock) {

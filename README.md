@@ -36,6 +36,26 @@ Replacing the app does not touch your library.
 - **Zoom per book**, from 70% to 200%.
 - **A closable outline.** PDF bookmarks, the EPUB table of contents, and Markdown headings. HTML buried in a heading, including anchor tags, is shown as text.
 - **Search, Reading, and Finished** filters, and a continue card for the book you last left open.
+- **An image viewer.** Click a picture in any book to open it full screen, then zoom and pan.
+
+## Keyboard
+
+Press `?` anywhere for the full list.
+
+| Keys | Does |
+| --- | --- |
+| `→` `PgDn` `Space` | Next page |
+| `←` `PgUp` `Shift Space` | Previous page |
+| `↓` `↑` | Scroll. A PDF turns the page at its edge, an EPUB turns it right away. |
+| `Home` `End` | First and last page |
+| `O` | Show or hide the outline |
+| `Ctrl +` `Ctrl −` `Ctrl 0` | Zoom in, out, and reset |
+| `F11` | Full screen |
+| `Esc` | Leave full screen, close the outline, then go back to the library |
+| `Ctrl O` | Add a book |
+| `Ctrl F` or `/` | Search the shelf |
+
+On macOS, use `⌘` in place of `Ctrl`.
 
 Books are copied into Folio’s own folder. The original file can be moved or deleted.
 

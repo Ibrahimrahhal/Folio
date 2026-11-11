@@ -23,6 +23,9 @@ async function boot() {
     const { installPreview } = await import('./preview.js');
     await installPreview();
   }
+  const root = document.documentElement;
+  if (window.folio?.platform) root.dataset.platform = window.folio.platform;
+  if (window.folio?.frame?.custom) root.dataset.frame = 'custom';
   createRoot(document.getElementById('root')).render(<App />);
 }
 

@@ -2,10 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import DOMPurify from 'dompurify';
 import { renderMarkdown } from '../markdownDoc.js';
 
-export default function MarkdownReader({ bookId, startRatio, zoom = 1, controls, onLocation, onReady, onOutline }) {
+export default function MarkdownReader({ bookId, startRatio, zoom = 1, controls, onLocation, onReady, onOutline, onImage }) {
   const scrollerRef = useRef(null);
-  const callbacks = useRef({ onLocation, onReady, onOutline });
-  callbacks.current = { onLocation, onReady, onOutline };
+  const callbacks = useRef({ onLocation, onReady, onOutline, onImage });
+  callbacks.current = { onLocation, onReady, onOutline, onImage };
   const readyOnce = useRef(false);
   const [html, setHtml] = useState('');
   const [error, setError] = useState('');
@@ -65,7 +65,33 @@ export default function MarkdownReader({ bookId, startRatio, zoom = 1, controls,
 
     const onScroll = () => report();
     el.addEventListener('scroll', onScroll, { passive: true });
+    const openImage = (img) => {
+      const rect = img.getBoundingClientRect();
+      callbacks.current.onImage?.({
+        src: img.currentSrc || img.src,
+        alt: img.alt || img.title || '',
+        hint: { w: rect.width, h: rect.height },
+      });
+    };
+    // Only pictures that actually decoded become targets. A link around an image keeps
+    // its link, since that is usually where the author meant the click to go.
+    const pictures = [...el.querySelectorAll('.markdown img')].filter((img) => !img.closest('a[href]'));
+    for (const img of pictures) {
+      img.decode().then(() => {
+        if (!img.isConnected) return;
+        img.classList.add('md-zoomable');
+        img.tabIndex = 0;
+        img.setAttribute('role', 'button');
+        img.setAttribute('aria-label', img.alt ? `View image: ${img.alt}` : 'View image');
+      }, () => {});
+    }
     const onClick = (event) => {
+      const picture = event.target.closest?.('img.md-zoomable');
+      if (picture) {
+        event.preventDefault();
+        openImage(picture);
+        return;
+      }
       const link = event.target.closest?.('a');
       if (!link) return;
       const href = link.getAttribute('href') || '';
@@ -75,11 +101,21 @@ export default function MarkdownReader({ bookId, startRatio, zoom = 1, controls,
       }
     };
     el.addEventListener('click', onClick);
+    const onKeyDown = (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      const picture = event.target.closest?.('img.md-zoomable');
+      if (!picture) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openImage(picture);
+    };
+    el.addEventListener('keydown', onKeyDown);
     controls.current = {
       prev: () => el.scrollBy({ top: -el.clientHeight * 0.86 }),
       next: () => el.scrollBy({ top: el.clientHeight * 0.86 }),
       first: () => { el.scrollTop = 0; },
       last: () => { el.scrollTop = el.scrollHeight; },
+      scroll: (delta) => el.scrollBy({ top: delta }),
       goTo: (item) => {
         const node = el.querySelector(`#${CSS.escape(item.id)}`);
         node?.scrollIntoView({ block: 'start' });
@@ -88,6 +124,7 @@ export default function MarkdownReader({ bookId, startRatio, zoom = 1, controls,
     return () => {
       el.removeEventListener('scroll', onScroll);
       el.removeEventListener('click', onClick);
+      el.removeEventListener('keydown', onKeyDown);
     };
   }, [safeHtml, startRatio, controls]);
 

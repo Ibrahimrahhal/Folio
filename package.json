@@ -20,7 +20,7 @@
     "build": "vite build",
     "start": "vite build && electron .",
     "icon": "electron scripts/make-icon.cjs",
-    "test": "node scripts/self-check.cjs && node scripts/check-outline.mjs",
+    "test": "node scripts/self-check.cjs && node scripts/check-outline.mjs && node scripts/check-pdf-images.mjs",
     "dist": "vite build && electron-builder --win portable --config.portable.artifactName=Folio.exe",
     "release": "vite build && electron-builder"
   },

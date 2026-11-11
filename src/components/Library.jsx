@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { coverSrc, formatLabel, percentLabel, pluralBooks, statusWord } from '../bookUtils.js';
 import { enrichPdf } from '../enrichPdf.js';
 import Spike from './Spike.jsx';
+import WindowControls, { ShortcutsButton } from './WindowControls.jsx';
+import { isMac } from '../windowState.js';
 
 const FILTERS = [
   { id: 'all', label: 'All' },
@@ -21,6 +23,7 @@ export default function Library({ onOpen }) {
   const importRef = useRef(async () => {});
   const enriching = useRef(new Set());
   const dragDepth = useRef(0);
+  const searchRef = useRef(null);
 
   async function refresh() {
     const next = await window.folio.listBooks();
@@ -49,6 +52,29 @@ export default function Library({ onOpen }) {
   importRef.current = importBooks;
 
   useEffect(() => window.folio.onMenuAdd?.(() => importRef.current()), []);
+
+  useEffect(() => {
+    function onKey(event) {
+      if (document.querySelector('[aria-modal="true"]')) return;
+      const key = event.key.toLowerCase();
+      const mod = isMac() ? event.metaKey : event.ctrlKey;
+      const typing = event.target instanceof HTMLElement && event.target.closest('input, textarea');
+      // macOS gets Cmd+O from the app menu; elsewhere there is no menu, so the page answers it.
+      if (mod && !event.altKey && key === 'o' && !isMac()) {
+        event.preventDefault();
+        importRef.current();
+      } else if ((mod && !event.altKey && key === 'f') || (key === '/' && !typing && !mod)) {
+        if (!searchRef.current) return;
+        event.preventDefault();
+        searchRef.current.focus();
+        searchRef.current.select();
+      } else if (key === 'escape' && event.target === searchRef.current && query) {
+        setQuery('');
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [query]);
 
   useEffect(() => {
     const pending = books.filter((book) => book.format === 'pdf' && !book.enriched && !enriching.current.has(book.id));
@@ -155,11 +181,16 @@ export default function Library({ onOpen }) {
           <Spike size={16} />
           <span>Folio</span>
         </div>
-        <button type="button" className="btn-primary" onClick={importBooks} disabled={busy}>
-          {busy ? 'Adding…' : 'Add a book'}
-        </button>
+        <div className="nav-end">
+          <button type="button" className="btn-primary" onClick={importBooks} disabled={busy}>
+            {busy ? 'Adding…' : 'Add a book'}
+          </button>
+          <ShortcutsButton />
+          <WindowControls />
+        </div>
       </header>
 
+      <div className="library-scroll">
       <main className="library-main">
         {books.length === 0 && !loading ? (
           <section className="empty">
@@ -217,6 +248,7 @@ export default function Library({ onOpen }) {
                 ))}
               </div>
               <input
+                ref={searchRef}
                 className="input search"
                 type="search"
                 placeholder="Search the shelf"
@@ -266,6 +298,7 @@ export default function Library({ onOpen }) {
           Books are copied into Folio’s own folder. Your place in each one is written every five seconds, so closing the app still brings you back.
         </p>
       </footer>
+      </div>
 
       {dragging && (
         <div className="drop-veil">
